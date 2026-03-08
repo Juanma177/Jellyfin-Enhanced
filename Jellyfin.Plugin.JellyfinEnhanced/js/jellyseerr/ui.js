@@ -3,7 +3,8 @@
     'use strict';
 
     const ui = {};
-    const logPrefix = '🪼 Jellyfin Enhanced: Jellyseerr UI:';
+    const logPrefix = '🪼 Jellyfin Enhanced: Seerr UI:';
+    const escapeHtml = JE.escapeHtml;
 
     // State variables managed by the main jellyseerr.js, but used by UI functions
     let jellyseerrHoverPopover = null;
@@ -139,6 +140,8 @@
             ...(item.mediaInfo?.downloadStatus4k || [])
         ];
 
+        // Download status fields originate from the Jellyseerr API and must be
+        // escaped before interpolation into HTML to prevent stored XSS.
         if (allDownloads.length === 0) {
             console.debug(`${logPrefix} No download status found`);
             return null;
@@ -163,7 +166,7 @@
                 // For queued items, show 0% progress
                 popoverHTML += `
                     <div class="jellyseerr-popover-item">
-                        <div class="title">${downloadStatus.title || JE.t('jellyseerr_popover_downloading')}</div>
+                        <div class="title">${escapeHtml(downloadStatus.title) || JE.t('jellyseerr_popover_downloading')}</div>
                         <div class="jellyseerr-hover-progress"><div class="bar" style="width:0%;"></div></div>
                         <div class="row">
                             <div>0%</div>
@@ -177,12 +180,12 @@
                 const etaText = formatEtaText(downloadStatus);
                 popoverHTML += `
                     <div class="jellyseerr-popover-item">
-                        <div class="title">${downloadStatus.title || JE.t('jellyseerr_popover_downloading')}</div>
+                        <div class="title">${escapeHtml(downloadStatus.title) || JE.t('jellyseerr_popover_downloading')}</div>
                         <div class="jellyseerr-hover-progress"><div class="bar" style="width:${percentage}%;"></div></div>
                         <div class="row">
                             <div>${percentage}%</div>
-                            <div class="status">${statusDisplay}</div>
-                            ${etaText ? `<div class="eta">${etaText}</div>` : ''}
+                            <div class="status">${escapeHtml(statusDisplay)}</div>
+                            ${etaText ? `<div class="eta">${escapeHtml(etaText)}</div>` : ''}
                         </div>
                     </div>`;
             }
@@ -325,7 +328,7 @@
     // ================================
 
     /**
-     * Adds main CSS styles for Jellyseerr integration.
+     * Adds main CSS styles for Seerr integration.
      */
     ui.addMainStyles = function() {
         const styleId = 'jellyseerr-styles';
@@ -335,7 +338,7 @@
         style.textContent = `
             /* LAYOUT & ICONS */
             .jellyseerr-section { margin-bottom: 1em; }
-            .jellyseerr-section .itemsContainer { white-space: nowrap; }
+            .jellyseerr-section .itemsContainer { }
             #jellyseerr-search-icon { position: absolute; right: 10px; top: 68%; transform: translateY(-50%); user-select: none; z-index: 10; transition: filter .2s, opacity .2s, transform .2s; }
             .inputContainer { position: relative !important; }
             .jellyseerr-icon { width: 30px; height: 30px; filter: drop-shadow(2px 2px 6px rgba(0,0,0,0.8)); }
@@ -413,7 +416,7 @@
                 overflow: visible !important;
             }
             .jellyseerr-card .cardBox { overflow: visible !important; }
-            .jellyseerr-section .scrollSlider { overflow: visible !important; }
+            .jellyseerr-section .vertical-wrap { overflow: visible !important; }
 
             /* Library item styling */
             .jellyseerr-card-in-library .cardText-first a {
@@ -676,7 +679,7 @@
     // ================================
 
     /**
-     * Updates the Jellyseerr icon in the search field based on current state.
+     * Updates the Seerr icon in the search field based on current state.
      * @param {boolean} isJellyseerrActive - If the server is reachable.
      * @param {boolean} jellyseerrUserFound - If the current user is linked.
      * @param {boolean} isJellyseerrOnlyMode - If the results are filtered.
@@ -773,7 +776,7 @@
     }
 
     /**
-     * Renders Jellyseerr search results into the search page with improved placement logic.
+     * Renders Seerr search results into the search page with improved placement logic.
      * @param {Array} results - Array of search result items.
      * @param {string} query - The search query that generated these results.
      * @param {boolean} isJellyseerrOnlyMode - Whether the filter is active.
@@ -795,24 +798,17 @@
 
         const primarySectionKeywords = ['movies', 'shows', 'film', 'serier', 'filme', 'serien', 'películas', 'series', 'films', 'séries', 'serie tv'];
 
-        let attempts = 0;
-        const maxAttempts = 75; // ~15 seconds
-
-        const injectionInterval = setInterval(() => {
-            attempts++;
+        function injectSection() {
             const noResultsMessage = searchPage.querySelector('.noItemsMessage');
             const allSections = Array.from(searchPage.querySelectorAll('.verticalSection:not(.jellyseerr-section)'));
-            const hasContent = allSections.length > 0;
 
-            if ((hasContent || noResultsMessage) || attempts >= maxAttempts) {
-                clearInterval(injectionInterval);
+            if (noResultsMessage) {
+                noResultsMessage.textContent = JE.t('jellyseerr_no_results_jellyfin', { query });
+                noResultsMessage.parentElement.insertBefore(sectionToInject, noResultsMessage.nextSibling);
+                return true;
+            }
 
-                if (noResultsMessage) {
-                    noResultsMessage.textContent = JE.t('jellyseerr_no_results_jellyfin', { query });
-                    noResultsMessage.parentElement.insertBefore(sectionToInject, noResultsMessage.nextSibling);
-                    return;
-                }
-
+            if (allSections.length > 0) {
                 let lastPrimarySection = null;
                 for (let i = allSections.length - 1; i >= 0; i--) {
                     const section = allSections[i];
@@ -830,15 +826,36 @@
                     if (resultsContainer) {
                         resultsContainer.prepend(sectionToInject);
                     } else {
-                        searchPage.appendChild(sectionToInject); // Fallback
+                        searchPage.appendChild(sectionToInject);
                     }
                 }
+                return true;
             }
-        }, 200);
+
+            return false;
+        }
+
+        // Try immediate injection first
+        if (!injectSection()) {
+            // Use MutationObserver for faster detection than polling
+            let observer = null;
+            const timeoutId = setTimeout(() => {
+                if (observer) observer.disconnect();
+                injectSection(); // Force inject after timeout
+            }, 3000);
+
+            observer = new MutationObserver(() => {
+                if (injectSection()) {
+                    observer.disconnect();
+                    clearTimeout(timeoutId);
+                }
+            });
+            observer.observe(searchPage, { childList: true, subtree: true });
+        }
     };
 
     /**
-     * Creates the main Jellyseerr results section.
+     * Creates the main Seerr results section.
      * @param {Array} results - Array of search result items.
      * @param {boolean} isJellyseerrOnlyMode - Whether the filter is active.
      * @param {boolean} isJellyseerrActive - If the server is reachable.
@@ -996,8 +1013,8 @@
     }
 
     /**
-     * Creates an individual Jellyseerr result card.
-     * @param {Object} item - Search result item from Jellyseerr API.
+     * Creates an individual Seerr result card.
+     * @param {Object} item - Search result item from Seerr API.
      * @param {boolean} isJellyseerrActive - If the server is reachable.
      * @param {boolean} jellyseerrUserFound - If the current user is linked.
      * @returns {HTMLElement} - Card element.
@@ -1006,8 +1023,9 @@
         const year = item.releaseDate?.substring(0, 4) || item.firstAirDate?.substring(0, 4) || 'N/A';
         const posterUrl = item.posterPath ? `https://image.tmdb.org/t/p/w400${item.posterPath}` : 'https://i.ibb.co/fdbkXQdP/jellyseerr-poster-not-found.png';
         const rating = item.voteAverage ? item.voteAverage.toFixed(1) : 'N/A';
-        const titleText = item.title || item.name;
-        // Resolve Jellyseerr URL based on mappings or fallback to base URL
+        // Escape API-sourced values before interpolation into search card HTML
+        const titleText = escapeHtml(item.title || item.name);
+        // Resolve Seerr URL based on mappings or fallback to base URL
         const base = JE.jellyseerrAPI?.resolveJellyseerrBaseUrl() || '';
         const jellyseerrUrl = base ? `${base}/${item.mediaType}/${item.id}` : null;
         const useMoreInfoModal = !!(JE.pluginConfig && JE.pluginConfig.JellyseerrUseMoreInfoModal);
@@ -1079,7 +1097,7 @@
                 overview.className = 'jellyseerr-overview';
                 overview.style.cursor = 'pointer';
                 overview.innerHTML = `
-                    <div class="content">${((item.overview || JE.t('jellyseerr_card_no_info')).slice(0, 500))}</div>
+                    <div class="content">${escapeHtml((item.overview || JE.t('jellyseerr_card_no_info')).slice(0, 500))}</div>
                     <button type="button" class="jellyseerr-request-button" data-tmdb-id="${item.id}" data-media-type="${item.mediaType}"></button>
                 `;
 
@@ -1339,8 +1357,8 @@
     }
 
     /**
-     * Fetches streaming provider icons from the TMDB API and adds them to a specified container element on a Jellyseerr poster.
-     * This function is called only if the "Show Elsewhere on Jellyseerr" setting is enabled and a TMDB API key is present.
+     * Fetches streaming provider icons from the TMDB API and adds them to a specified container element on a Seerr poster.
+     * This function is called only if the "Show Elsewhere on Seerr" setting is enabled and a TMDB API key is present.
      * It retrieves providers based on the default region and filters configured in the Elsewhere plugin settings.
      *
      * @async
@@ -1627,7 +1645,8 @@
                             } else if (error.responseJSON?.message) {
                                 errorMessage = error.responseJSON.message;
                             }
-                            mainButton.innerHTML = `<span>${errorMessage}</span>${icons.error}`;
+                            // Escape API-sourced error message before inserting into HTML
+                            mainButton.innerHTML = `<span>${escapeHtml(errorMessage)}</span>${icons.error}`;
                             mainButton.classList.add('jellyseerr-button-error');
                         }
                     }
@@ -1700,7 +1719,7 @@
                         } else if (error.responseJSON?.message) {
                             errorMessage = error.responseJSON.message;
                         }
-                        button.innerHTML = `<span>${errorMessage}</span>${icons.error}`;
+                        button.innerHTML = `<span>${escapeHtml(errorMessage)}</span>${icons.error}`;
                         button.classList.add('jellyseerr-button-error');
                     }
                 }
@@ -1795,7 +1814,7 @@
         if (!imageContainer) return;
         const badge = document.createElement('div');
         badge.className = 'jellyseerr-collection-badge';
-        badge.innerHTML = `<span class="material-icons">collections</span><span>${item.collection.name || JE.t('jellyseerr_card_badge_collection')}</span>`;
+        badge.innerHTML = `<span class="material-icons">collections</span><span>${escapeHtml(item.collection.name) || JE.t('jellyseerr_card_badge_collection')}</span>`; // collection name escaped
         badge.title = `Part of ${item.collection.name || 'collection'}`;
         badge.addEventListener('click', (e) => {
             e.preventDefault();
@@ -2094,13 +2113,13 @@
             const checkboxDisabled = !partialRequestsEnabled || !canRequest;
 
             seasonItem.innerHTML = `
-                <input type="checkbox" class="jellyseerr-season-checkbox" data-season-number="${seasonNumber}" ${checkboxDisabled ? 'disabled' : ''} style="${!partialRequestsEnabled ? 'cursor: not-allowed;' : ''}">
+                <input type="checkbox" class="jellyseerr-season-checkbox" data-season-number="${escapeHtml(seasonNumber)}" ${checkboxDisabled ? 'disabled' : ''} style="${!partialRequestsEnabled ? 'cursor: not-allowed;' : ''}">
                 <div class="jellyseerr-season-info">
-                    <div class="jellyseerr-season-name">${season.name || `Season ${seasonNumber}`}</div>
-                    <div class="jellyseerr-season-meta">${season.airDate ? season.airDate.substring(0, 4) : ''}</div>
+                    <div class="jellyseerr-season-name">${escapeHtml(season.name || `Season ${seasonNumber}`)}</div>
+                    <div class="jellyseerr-season-meta">${escapeHtml(season.airDate ? season.airDate.substring(0, 4) : '')}</div>
                 </div>
-                <div class="jellyseerr-season-episodes">${season.episodeCount || 0} ep</div>
-                <div class="jellyseerr-season-status jellyseerr-season-status-${statusClass}">${statusText}</div>
+                <div class="jellyseerr-season-episodes">${escapeHtml(season.episodeCount || 0)} ep</div>
+                <div class="jellyseerr-season-status jellyseerr-season-status-${escapeHtml(statusClass)}">${escapeHtml(statusText)}</div>
             `;
 
             if(existingCheckbox) {
@@ -2194,15 +2213,15 @@
                 <div class="jellyseerr-collection-movie-row">
                     <input type="checkbox"
                            class="jellyseerr-collection-checkbox"
-                           id="movie-${movie.id}"
-                           data-tmdb-id="${movie.id}"
+                           id="movie-${escapeHtml(movie.id)}"
+                           data-tmdb-id="${escapeHtml(movie.id)}"
                            ${isDisabled ? 'disabled' : 'checked'}>
-                    <img src="${poster}" alt="${movie.title}" class="jellyseerr-collection-movie-poster">
+                    <img src="${escapeHtml(poster)}" alt="${escapeHtml(movie.title)}" class="jellyseerr-collection-movie-poster">
                     <div class="jellyseerr-collection-movie-details">
-                        <div class="title">${movie.title}</div>
-                        <div class="year">${year}</div>
+                        <div class="title">${escapeHtml(movie.title)}</div>
+                        <div class="year">${escapeHtml(year)}</div>
                     </div>
-                    <div class="jellyseerr-season-status jellyseerr-season-status-${statusClass}">${statusText}</div>
+                    <div class="jellyseerr-season-status jellyseerr-season-status-${escapeHtml(statusClass)}">${escapeHtml(statusText)}</div>
                 </div>
             `;
         }).join('');
@@ -2328,7 +2347,7 @@
     };
 
     /**
-     * Updates existing Jellyseerr results in the DOM with fresh data.
+     * Updates existing Seerr results in the DOM with fresh data.
      * @param {Array} newResults - The new array of result items from the API.
      * @param {boolean} isJellyseerrActive - If the server is reachable.
      * @param {boolean} jellyseerrUserFound - If the current user is linked.
